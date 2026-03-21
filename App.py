@@ -20,11 +20,22 @@ with st.expander("📂 Datei-Upload (SMARD-CSV)", expanded=True):
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ EE-Kapazitätsfaktoren")
-    wind_on_f  = st.slider("Wind Onshore ×",  0.0, 5.0, 1.0, 0.1)
-    wind_off_f = st.slider("Wind Offshore ×", 0.0, 5.0, 1.0, 0.1)
-    solar_f    = st.slider("Photovoltaik ×",  0.0, 5.0, 1.0, 0.1)
-    bio_f      = st.slider("Biomasse ×",      0.0, 3.0, 1.0, 0.1)
-    wasser_f   = st.slider("Wasserkraft ×",   0.0, 3.0, 1.0, 0.1)
+    global_f = st.slider("🌐 Alle EE ×", 0.5, 3.0, 1.0, 0.05,
+                          help="Skaliert alle nicht-gesperrten Quellen gleichzeitig")
+    st.caption("🔒 = von globalem Slider ausgenommen")
+    st.markdown("---")
+
+    def _ee_row(label, key_lock, key_val, max_val=5.0):
+        c1, c2 = st.columns([1, 5])
+        locked = c1.checkbox("🔒", key=key_lock, help="Globalen Slider ignorieren")
+        val    = c2.slider(label, 0.0, max_val, 1.0, 0.1, key=key_val)
+        return val if locked else val * global_f
+
+    wind_on_f  = _ee_row("Wind Onshore ×",  "lk_won",  "sv_won")
+    wind_off_f = _ee_row("Wind Offshore ×", "lk_woff", "sv_woff")
+    solar_f    = _ee_row("Photovoltaik ×",  "lk_sol",  "sv_sol")
+    bio_f      = _ee_row("Biomasse ×",      "lk_bio",  "sv_bio", 3.0)
+    wasser_f   = _ee_row("Wasserkraft ×",   "lk_was",  "sv_was", 3.0)
 
     st.markdown("---")
     st.markdown("**Referenz:** Alle deutschen Pumpspeicher ≈ 40 GWh")
@@ -94,7 +105,7 @@ def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
         mask = (perioden_h >= bins[i]) & (perioden_h < bins[i+1])
         result[labels[i]] = speicher_mwh[mask].sum() / 1e3  # GWh
 
-    return result, residuum, ee, freqs, speicher_mwh, perioden_h
+    return result, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
 
 
 # ── Hauptbereich ──────────────────────────────────────────────────────────────
@@ -140,19 +151,28 @@ if verbrauch_bytes and erzeugung_bytes:
         st.stop()
 
     # Berechnung
-    result, residuum, ee, freqs, speicher_mwh, perioden_h = berechne_speicher(
+    result, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
         df_sel, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f)
 
     gesamt = sum(result.values())
     ee_anteil = ee.mean() / df_sel['verbrauch'].mean() * 100
+    # DC-Energie: MWh/Intervall × 35040 Intervalle/Jahr → GWh/Jahr
+    dc_gwh_year = dc_mwh * 35040 / 1000
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
     st.subheader("📊 Kennzahlen")
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Gesamtspeicherbedarf", f"{gesamt:.0f} GWh")
     k2.metric("EE-Deckungsgrad (Mittel)", f"{ee_anteil:.1f} %")
-    k3.metric("Residuum Mittelwert", f"{residuum.mean()/1e3:.1f} GWh/h")
+    dc_label = "Defizit" if dc_gwh_year > 0 else "Überschuss"
+    dc_icon  = "⚠️" if dc_gwh_year > 0 else "♻️"
+    k3.metric(f"DC-Komponente ({dc_label})",
+              f"{abs(dc_gwh_year):,.0f} GWh/J",
+              help="Mittlerer jährlicher Energieüberschuss (negativ) oder -defizit (positiv) des Residuums. "
+                   "Defizit = muss importiert/konventionell erzeugt werden; Überschuss = muss gedumpt/exportiert werden.")
     k4.metric("Faktor vs. Pumpspeicher (~40 GWh)", f"{gesamt/40:.0f}×")
+    k5.metric(f"{dc_icon} DC absolut", f"{abs(dc_mwh/1e3):.1f} GWh/h",
+              help="Mittlerer Leistungsüberschuss/-defizit pro Stunde")
 
     # ── Plot 1: Balkendiagramm ─────────────────────────────────────────────────
     st.subheader("🔋 Speicherbedarf nach Zeitskala")
@@ -194,18 +214,25 @@ if verbrauch_bytes and erzeugung_bytes:
         fig2.add_trace(go.Scatter(x=daily.index, y=daily['residuum'],
                                    name='Residuum', line=dict(color='crimson')))
         fig2.add_hline(y=0, line_dash="dash", line_color="black", line_width=0.8)
+        fig2.add_hline(y=dc_mwh, line_dash="dot", line_color="orange", line_width=1.2,
+                       annotation_text=f"DC ({dc_mwh/1e3:+.1f} GWh/h)",
+                       annotation_position="bottom right")
         fig2.update_layout(yaxis_title="MWh", height=380,
                             plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))
         st.plotly_chart(fig2, use_container_width=True)
 
     with col_b:
         st.subheader("🌊 FFT-Spektrum (log-log)")
-        mask = (freqs > 0) & (perioden_h < 400 * 24)
-        perioden_tage = perioden_h[mask] / 24
+        mask = (freqs > 0) & (perioden_h >= 6) & (perioden_h <= 400 * 24)
+        pd_tage = perioden_h[mask] / 24
+        sp_mwh  = speicher_mwh[mask]
+        # Aufsteigend nach Periode sortieren (FFT liefert absteigende Reihenfolge)
+        order = np.argsort(pd_tage)
+        pd_tage, sp_mwh = pd_tage[order], sp_mwh[order]
 
         fig3 = go.Figure()
         fig3.add_trace(go.Scatter(
-            x=perioden_tage, y=speicher_mwh[mask],
+            x=pd_tage, y=sp_mwh,
             mode='lines', line=dict(color='steelblue', width=0.8),
             name='Speicherbedarf'))
 
@@ -213,11 +240,15 @@ if verbrauch_bytes and erzeugung_bytes:
             fig3.add_vline(x=p, line_dash="dash", line_color="red", opacity=0.5,
                            annotation_text=name, annotation_position="top")
 
+        tick_vals = [6/24, 1, 7, 30, 182, 365]
+        tick_text = ['6h', '1 Tag', '1 Wo.', '1 Mo.', '6 Mo.', '1 Jahr']
         fig3.update_layout(
             xaxis_type='log', yaxis_type='log',
-            xaxis_title='Periode [Tage]', yaxis_title='Speicherkapazität [MWh]',
+            xaxis_title='Periode', yaxis_title='Speicherkapazität [MWh]',
             height=380, plot_bgcolor='white',
-            xaxis=dict(gridcolor='lightgrey'), yaxis=dict(gridcolor='lightgrey'))
+            xaxis=dict(gridcolor='lightgrey', tickvals=tick_vals, ticktext=tick_text,
+                       range=[np.log10(6/24), np.log10(400)]),
+            yaxis=dict(gridcolor='lightgrey'))
         st.plotly_chart(fig3, use_container_width=True)
 
     # ── Rohdaten ──────────────────────────────────────────────────────────────

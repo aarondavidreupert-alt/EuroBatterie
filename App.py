@@ -156,23 +156,21 @@ if verbrauch_bytes and erzeugung_bytes:
 
     gesamt = sum(result.values())
     ee_anteil = ee.mean() / df_sel['verbrauch'].mean() * 100
-    # DC-Energie: MWh/Intervall × 35040 Intervalle/Jahr → GWh/Jahr
-    dc_gwh_year = dc_mwh * 35040 / 1000
+    dc_gwh_year = dc_mwh * 8760 / 1e3  # MWh/h (Leistung) × 8760 h → GWh/Jahr
 
     # ── KPIs ──────────────────────────────────────────────────────────────────
     st.subheader("📊 Kennzahlen")
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Gesamtspeicherbedarf", f"{gesamt:.0f} GWh")
     k2.metric("EE-Deckungsgrad (Mittel)", f"{ee_anteil:.1f} %")
-    dc_label = "Defizit" if dc_gwh_year > 0 else "Überschuss"
-    dc_icon  = "⚠️" if dc_gwh_year > 0 else "♻️"
-    k3.metric(f"DC-Komponente ({dc_label})",
-              f"{abs(dc_gwh_year):,.0f} GWh/J",
-              help="Mittlerer jährlicher Energieüberschuss (negativ) oder -defizit (positiv) des Residuums. "
-                   "Defizit = muss importiert/konventionell erzeugt werden; Überschuss = muss gedumpt/exportiert werden.")
+    if dc_gwh_year > 0:
+        dc_val_str  = f"+{dc_gwh_year:,.0f} GWh/Jahr"
+        dc_help     = "➕ Mittleres Defizit – muss zugeführt werden (Importe / konventionell)"
+    else:
+        dc_val_str  = f"{dc_gwh_year:,.0f} GWh/Jahr"
+        dc_help     = "➖ Mittlerer Überschuss – muss abgeführt werden (Export / Curtailment)"
+    k3.metric("DC-Komponente", dc_val_str, help=dc_help)
     k4.metric("Faktor vs. Pumpspeicher (~40 GWh)", f"{gesamt/40:.0f}×")
-    k5.metric(f"{dc_icon} DC absolut", f"{abs(dc_mwh/1e3):.1f} GWh/h",
-              help="Mittlerer Leistungsüberschuss/-defizit pro Stunde")
 
     # ── Plot 1: Balkendiagramm ─────────────────────────────────────────────────
     st.subheader("🔋 Speicherbedarf nach Zeitskala")
@@ -215,7 +213,7 @@ if verbrauch_bytes and erzeugung_bytes:
                                    name='Residuum', line=dict(color='crimson')))
         fig2.add_hline(y=0, line_dash="dash", line_color="black", line_width=0.8)
         fig2.add_hline(y=dc_mwh, line_dash="dot", line_color="orange", line_width=1.2,
-                       annotation_text=f"DC ({dc_mwh/1e3:+.1f} GWh/h)",
+                       annotation_text=f"DC ({dc_gwh_year:+,.0f} GWh/J)",
                        annotation_position="bottom right")
         fig2.update_layout(yaxis_title="MWh", height=380,
                             plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))

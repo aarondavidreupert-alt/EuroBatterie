@@ -8,12 +8,17 @@ st.set_page_config(page_title="Stromspeicher-Analyse", layout="wide")
 st.title("⚡ Stromspeicherbedarf Deutschland – Fourier-Analyse")
 st.markdown("Methode: Residuum (Verbrauch − EE) → FFT → Speicherkapazität = $A / (\\pi f)$ pro Frequenzkomponente")
 
+# ── Upload im Hauptbereich ────────────────────────────────────────────────────
+with st.expander("📂 Datei-Upload (SMARD-CSV)", expanded=True):
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+        verbrauch_file = st.file_uploader("Verbrauch CSV", type="csv", key="v")
+    with col_u2:
+        erzeugung_file = st.file_uploader("Erzeugung CSV", type="csv", key="e")
+    st.caption("Dateien von [smard.de](https://www.smard.de/home/downloadcenter/download-marktdaten/) · Format: Viertelstunde, Deutschland")
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("📂 Datei-Upload")
-    verbrauch_file = st.file_uploader("Verbrauch CSV (SMARD)", type="csv", key="v")
-    erzeugung_file = st.file_uploader("Erzeugung CSV (SMARD)", type="csv", key="e")
-
     st.header("⚙️ EE-Kapazitätsfaktoren")
     wind_on_f  = st.slider("Wind Onshore ×",  0.0, 5.0, 1.0, 0.1)
     wind_off_f = st.slider("Wind Offshore ×", 0.0, 5.0, 1.0, 0.1)
@@ -220,11 +225,4 @@ if verbrauch_bytes and erzeugung_bytes:
         st.dataframe(daily.round(1), use_container_width=True)
 
 else:
-    st.info("👈 Bitte links die beiden SMARD-CSV-Dateien hochladen um zu starten (oder lokale Fallback-CSVs bereitstellen).")
-    st.markdown("""
-    **Benötigte Dateien von [smard.de](https://www.smard.de/home/downloadcenter/download-marktdaten/):**
-    - `Realisierter_Stromverbrauch_...csv`
-    - `Realisierte_Erzeugung_...csv`
-    
-    Format: Viertelstunde, Deutschland, beliebiger Zeitraum
-    """)
+    st.info("Bitte oben beide SMARD-CSV-Dateien hochladen – oder lokale Fallback-CSVs (`Realisierter_Stromverbrauch_2025.csv` / `Realisierte_Erzeugung_2025.csv`) im App-Verzeichnis bereitstellen.")

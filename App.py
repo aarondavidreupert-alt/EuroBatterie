@@ -61,7 +61,7 @@ def lade_daten(verbrauch_bytes, erzeugung_bytes):
     df['Photovoltaik']      = ee['Photovoltaik [MWh] Originalauflösungen']
     df['Sonstige Erneuerbare'] = ee['Sonstige Erneuerbare [MWh] Originalauflösungen']
 
-    return df.dropna()
+    return df.dropna().sort_index()
 
 
 def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):

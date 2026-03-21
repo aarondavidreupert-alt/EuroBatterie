@@ -93,8 +93,30 @@ def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
 
 
 # ── Hauptbereich ──────────────────────────────────────────────────────────────
+import os
+
+FALLBACK_VERBRAUCH = os.path.join(os.path.dirname(__file__), "Realisierter_Stromverbrauch_2025.csv")
+FALLBACK_ERZEUGUNG = os.path.join(os.path.dirname(__file__), "Realisierte_Erzeugung_2025.csv")
+
+def _fallback_verfuegbar():
+    return (os.path.exists(FALLBACK_VERBRAUCH) and os.path.getsize(FALLBACK_VERBRAUCH) > 10 and
+            os.path.exists(FALLBACK_ERZEUGUNG) and os.path.getsize(FALLBACK_ERZEUGUNG) > 10)
+
 if verbrauch_file and erzeugung_file:
-    df = lade_daten(verbrauch_file.read(), erzeugung_file.read())
+    verbrauch_bytes = verbrauch_file.read()
+    erzeugung_bytes = erzeugung_file.read()
+elif _fallback_verfuegbar():
+    st.info("ℹ️ Keine Dateien hochgeladen – lokale Fallback-CSVs werden verwendet.")
+    with open(FALLBACK_VERBRAUCH, "rb") as f:
+        verbrauch_bytes = f.read()
+    with open(FALLBACK_ERZEUGUNG, "rb") as f:
+        erzeugung_bytes = f.read()
+else:
+    verbrauch_bytes = None
+    erzeugung_bytes = None
+
+if verbrauch_bytes and erzeugung_bytes:
+    df = lade_daten(verbrauch_bytes, erzeugung_bytes)
 
     # Zeitraum-Auswahl
     st.subheader("📅 Zeitraum")
@@ -198,7 +220,7 @@ if verbrauch_file and erzeugung_file:
         st.dataframe(daily.round(1), use_container_width=True)
 
 else:
-    st.info("👈 Bitte links die beiden SMARD-CSV-Dateien hochladen um zu starten.")
+    st.info("👈 Bitte links die beiden SMARD-CSV-Dateien hochladen um zu starten (oder lokale Fallback-CSVs bereitstellen).")
     st.markdown("""
     **Benötigte Dateien von [smard.de](https://www.smard.de/home/downloadcenter/download-marktdaten/):**
     - `Realisierter_Stromverbrauch_...csv`

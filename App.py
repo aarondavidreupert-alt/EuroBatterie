@@ -97,15 +97,20 @@ def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
 
     perioden_h = np.where(freqs > 0, 1.0 / freqs, np.inf)
 
+    # Leistung pro Frequenzkomponente: A · 2π · f (in MW, da A in MWh und f in 1/h)
+    leistung_mw = amplitudes * 2 * np.pi * freqs
+
     labels = ['< 1h', '1–6h', '6–24h', '1–7 Tage', '1–4 Wochen', '1–6 Monate', '> 6 Monate']
     bins   = [0, 1, 6, 24, 24*7, 24*28, 24*180, np.inf]
 
-    result = {}
+    result          = {}
+    result_leistung = {}
     for i in range(len(bins) - 1):
         mask = (perioden_h >= bins[i]) & (perioden_h < bins[i+1])
-        result[labels[i]] = speicher_mwh[mask].sum() / 1e3  # GWh
+        result[labels[i]]          = speicher_mwh[mask].sum() / 1e3   # GWh
+        result_leistung[labels[i]] = leistung_mw[mask].sum()  / 1e3   # GW
 
-    return result, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
+    return result, result_leistung, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
 
 
 # ── Hauptbereich ──────────────────────────────────────────────────────────────
@@ -151,7 +156,7 @@ if verbrauch_bytes and erzeugung_bytes:
         st.stop()
 
     # Berechnung
-    result, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
+    result, result_leistung, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
         df_sel, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f)
 
     gesamt = sum(result.values())
@@ -194,6 +199,24 @@ if verbrauch_bytes and erzeugung_bytes:
         yaxis=dict(gridcolor='lightgrey')
     )
     st.plotly_chart(fig1, use_container_width=True)
+
+    # ── Plot 1b: Leistungsdiagramm ────────────────────────────────────────────
+    st.subheader("⚡ Maximale Speicherleistung pro Zeitskala")
+    lw_labels = list(result_leistung.keys())
+    lw_values = list(result_leistung.values())
+    fig_lw = go.Figure(go.Bar(
+        x=lw_labels, y=lw_values, marker_color=colors,
+        text=[f"{v:.1f} GW" for v in lw_values],
+        textposition='outside'
+    ))
+    fig_lw.update_layout(
+        yaxis_title="Leistung [GW]",
+        xaxis_title="Zeitskala",
+        height=400,
+        plot_bgcolor='white',
+        yaxis=dict(gridcolor='lightgrey')
+    )
+    st.plotly_chart(fig_lw, use_container_width=True)
 
     # ── Plot 2: Zeitreihe + FFT-Spektrum ──────────────────────────────────────
     col_a, col_b = st.columns(2)

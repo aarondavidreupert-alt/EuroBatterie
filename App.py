@@ -216,7 +216,13 @@ if verbrauch_bytes and erzeugung_bytes:
         xaxis_title="Zeitskala",
         height=400,
         plot_bgcolor='white',
-        yaxis=dict(gridcolor='lightgrey')
+        yaxis=dict(gridcolor='lightgrey'),
+        annotations=[dict(
+            text="P<sub>max</sub> = 2πf · A &nbsp;(Ableitung von E = A · sin(2πft))",
+            xref='paper', yref='paper', x=1.0, y=1.02,
+            xanchor='right', yanchor='bottom',
+            showarrow=False, font=dict(size=10, color='grey')
+        )]
     )
     st.plotly_chart(fig_lw, use_container_width=True)
 

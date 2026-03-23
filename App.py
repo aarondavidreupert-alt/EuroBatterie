@@ -105,12 +105,14 @@ def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
 
     result          = {}
     result_leistung = {}
+    result_pmax     = {}   # Spitzenleistung für Ragone: Pk = Ak / dt = Ak × 4
     for i in range(len(bins) - 1):
         mask = (perioden_h >= bins[i]) & (perioden_h < bins[i+1])
-        result[labels[i]]          = speicher_mwh[mask].sum() / 1e3   # GWh
-        result_leistung[labels[i]] = leistung_mw[mask].sum()  / 1e3   # GW
+        result[labels[i]]          = speicher_mwh[mask].sum() / 1e3          # GWh
+        result_leistung[labels[i]] = leistung_mw[mask].sum()  / 1e3          # GW (2πf)
+        result_pmax[labels[i]]     = (amplitudes[mask] * 4).sum() / 1e3      # GW (Ak/dt)
 
-    return result, result_leistung, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
+    return result, result_leistung, result_pmax, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
 
 
 # ── Hauptbereich ──────────────────────────────────────────────────────────────
@@ -156,7 +158,7 @@ if verbrauch_bytes and erzeugung_bytes:
         st.stop()
 
     # Berechnung
-    result, result_leistung, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
+    result, result_leistung, result_pmax, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
         df_sel, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f)
 
     gesamt = sum(result.values())
@@ -217,6 +219,65 @@ if verbrauch_bytes and erzeugung_bytes:
         yaxis=dict(gridcolor='lightgrey')
     )
     st.plotly_chart(fig_lw, use_container_width=True)
+
+    # ── Ragone-Diagramm ────────────────────────────────────────────────────────
+    st.subheader("📍 Ragone-Diagramm: Speicherkapazität vs. Spitzenleistung")
+
+    fig_rag = go.Figure()
+
+    # Technologie-Rechtecke (Daten-Koordinaten; Plotly übernimmt log-Transformation)
+    tech_boxes = [
+        # (Name,         x0,      x1,     y0,     y1,     fill-rgba,                    Rahmenfarbe)
+        ('Schwungrad',   5e-5,    0.05,   0.5,    5000,   'rgba(149,165,166,0.18)',     '#7f8c8d'),
+        ('Li-Ionen',     0.001,   200,    0.05,   2000,   'rgba(52,152,219,0.18)',      '#2980b9'),
+        ('Pumpspeicher', 0.5,     2000,   0.01,   40,     'rgba(46,204,113,0.18)',      '#27ae60'),
+        ('CAES',         10,      10000,  0.005,  5,      'rgba(230,126,34,0.18)',      '#d35400'),
+        ('Wasserstoff',  100,     1e7,    0.001,  30,     'rgba(155,89,182,0.18)',      '#8e44ad'),
+    ]
+
+    for name, x0, x1, y0, y1, fill, lc in tech_boxes:
+        fig_rag.add_shape(type='rect',
+            x0=x0, x1=x1, y0=y0, y1=y1, xref='x', yref='y',
+            fillcolor=fill, line=dict(color=lc, width=1), layer='below')
+        fig_rag.add_annotation(
+            x=np.sqrt(x0 * x1), y=np.sqrt(y0 * y1),  # geometrischer Mittelpunkt (log)
+            text=f"<b>{name}</b>", showarrow=False,
+            font=dict(size=9, color=lc), xref='x', yref='y')
+
+    # Konventionelle Kraftwerke: horizontale Bänder
+    fig_rag.add_hrect(y0=30, y1=58, fillcolor='rgba(231,76,60,0.07)', line_width=0,
+                      annotation_text='Gas DE (30–58 GW)',
+                      annotation_position='top left', annotation_font_size=9)
+    fig_rag.add_hrect(y0=10, y1=22, fillcolor='rgba(52,73,94,0.07)', line_width=0,
+                      annotation_text='Kohle DE (~15 GW)',
+                      annotation_position='bottom left', annotation_font_size=9)
+
+    # FFT-Punkte (ein Punkt pro Zeitskalen-Bin)
+    x_pts = [result[l]      for l in labels]   # GWh
+    y_pts = [result_pmax[l] for l in labels]   # GW
+
+    fig_rag.add_trace(go.Scatter(
+        x=x_pts, y=y_pts,
+        mode='markers+text',
+        marker=dict(size=13, color=colors, line=dict(width=1.5, color='white')),
+        text=labels,
+        textposition='top center',
+        textfont=dict(size=9),
+        name='FFT-Bins',
+        hovertemplate='<b>%{text}</b><br>Kapazität: %{x:.2g} GWh<br>Leistung: %{y:.2g} GW<extra></extra>'
+    ))
+
+    fig_rag.update_layout(
+        xaxis_type='log', yaxis_type='log',
+        xaxis_title='Speicherkapazität [GWh]',
+        yaxis_title='Spitzenleistung [GW]',
+        height=540,
+        plot_bgcolor='white',
+        xaxis=dict(gridcolor='lightgrey', range=[-4, 7]),
+        yaxis=dict(gridcolor='lightgrey', range=[-3, 4]),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_rag, use_container_width=True)
 
     # ── Plot 2: Zeitreihe + FFT-Spektrum ──────────────────────────────────────
     col_a, col_b = st.columns(2)

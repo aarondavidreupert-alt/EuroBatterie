@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import os
 
 st.set_page_config(page_title="Stromspeicher-Analyse", layout="wide")
 st.title("⚡ Stromspeicherbedarf Deutschland – Fourier-Analyse")
-st.markdown("Methode: Residuum (Verbrauch − EE) → FFT → Speicherkapazität = $A / (\\pi f)$ pro Frequenzkomponente")
 
-# ── Upload im Hauptbereich ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 📂 Abschnitt 1: Daten laden
+# ══════════════════════════════════════════════════════════════════════════════
 with st.expander("📂 Datei-Upload (SMARD-CSV)", expanded=True):
     col_u1, col_u2 = st.columns(2)
     with col_u1:
@@ -41,7 +42,9 @@ with st.sidebar:
     st.markdown("**Referenz:** Alle deutschen Pumpspeicher ≈ 40 GWh")
 
 
-# ── Hilfsfunktionen ───────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Hilfsfunktionen
+# ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def lade_daten(verbrauch_bytes, erzeugung_bytes):
     import io
@@ -65,59 +68,149 @@ def lade_daten(verbrauch_bytes, erzeugung_bytes):
     for c in ee_cols:
         ee[c] = pd.to_numeric(ee[c], errors='coerce')
 
-    df['Biomasse']          = ee['Biomasse [MWh] Originalauflösungen']
-    df['Wasserkraft']       = ee['Wasserkraft [MWh] Originalauflösungen']
-    df['Wind Offshore']     = ee['Wind Offshore [MWh] Originalauflösungen']
-    df['Wind Onshore']      = ee['Wind Onshore [MWh] Originalauflösungen']
-    df['Photovoltaik']      = ee['Photovoltaik [MWh] Originalauflösungen']
+    df['Biomasse']             = ee['Biomasse [MWh] Originalauflösungen']
+    df['Wasserkraft']          = ee['Wasserkraft [MWh] Originalauflösungen']
+    df['Wind Offshore']        = ee['Wind Offshore [MWh] Originalauflösungen']
+    df['Wind Onshore']         = ee['Wind Onshore [MWh] Originalauflösungen']
+    df['Photovoltaik']         = ee['Photovoltaik [MWh] Originalauflösungen']
     df['Sonstige Erneuerbare'] = ee['Sonstige Erneuerbare [MWh] Originalauflösungen']
 
     return df.dropna().sort_index()
 
 
-def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
-    ee = (df['Biomasse']          * bio_f   +
-          df['Wasserkraft']       * wasser_f +
-          df['Wind Offshore']     * wind_off_f +
-          df['Wind Onshore']      * wind_on_f  +
-          df['Photovoltaik']      * solar_f    +
-          df['Sonstige Erneuerbare'])
-
-    residuum = df['verbrauch'] - ee
-    signal_ac = residuum.values - residuum.mean()
-
-    N = len(signal_ac)
-    dt = 0.25  # Stunden
-    fft_vals   = np.fft.rfft(signal_ac)
+def _fft_bins(signal, dt=0.25):
+    """FFT eines AC-Signals → Speicherkapazität und Leistung pro Zeitskalen-Bin."""
+    N          = len(signal)
+    fft_vals   = np.fft.rfft(signal)
     freqs      = np.fft.rfftfreq(N, d=dt)
     amplitudes = np.abs(fft_vals) * 2 / N
 
     with np.errstate(divide='ignore', invalid='ignore'):
         speicher_mwh = np.where(freqs > 0, amplitudes / (np.pi * freqs), 0)
 
-    perioden_h = np.where(freqs > 0, 1.0 / freqs, np.inf)
-
-    # Leistung pro Frequenzkomponente: A · 2π · f (in MW, da A in MWh und f in 1/h)
-    leistung_mw = amplitudes * 2 * np.pi * freqs
+    perioden_h  = np.where(freqs > 0, 1.0 / freqs, np.inf)
+    leistung_mw = amplitudes * 2 * np.pi * freqs  # P_max = 2πf·A
 
     labels = ['< 1h', '1–6h', '6–24h', '1–7 Tage', '1–4 Wochen', '1–6 Monate', '> 6 Monate']
     bins   = [0, 1, 6, 24, 24*7, 24*28, 24*180, np.inf]
 
-    result          = {}
-    result_leistung = {}
-    result_pmax     = {}   # Spitzenleistung für Ragone: Pk = Ak / dt = Ak × 4
+    res_e, res_l, res_p = {}, {}, {}
     for i in range(len(bins) - 1):
-        mask = (perioden_h >= bins[i]) & (perioden_h < bins[i+1])
-        result[labels[i]]          = speicher_mwh[mask].sum() / 1e3          # GWh
-        result_leistung[labels[i]] = leistung_mw[mask].sum()  / 1e3          # GW (2πf)
-        result_pmax[labels[i]]     = (amplitudes[mask] * 4).sum() / 1e3      # GW (Ak/dt)
+        mask             = (perioden_h >= bins[i]) & (perioden_h < bins[i+1])
+        res_e[labels[i]] = speicher_mwh[mask].sum() / 1e3          # GWh
+        res_l[labels[i]] = leistung_mw[mask].sum()  / 1e3          # GW (2πf·A)
+        res_p[labels[i]] = (amplitudes[mask] * 4).sum() / 1e3      # GW (Ak/dt)
 
-    return result, result_leistung, result_pmax, residuum, ee, freqs, speicher_mwh, perioden_h, residuum.mean()
+    return res_e, res_l, res_p, freqs, speicher_mwh, perioden_h
 
 
-# ── Hauptbereich ──────────────────────────────────────────────────────────────
-import os
+def berechne_speicher(df, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f):
+    ee = (df['Biomasse']          * bio_f      +
+          df['Wasserkraft']       * wasser_f   +
+          df['Wind Offshore']     * wind_off_f +
+          df['Wind Onshore']      * wind_on_f  +
+          df['Photovoltaik']      * solar_f    +
+          df['Sonstige Erneuerbare'])
 
+    residuum = df['verbrauch'] - ee
+    dc_mwh   = residuum.mean()
+
+    # ── Ohne Overbuild-Korrektur ──────────────────────────────────────────
+    signal_ac = residuum.values - dc_mwh
+    res_e, res_l, res_p, freqs, speicher_mwh, perioden_h = _fft_bins(signal_ac)
+
+    # ── Mit Overbuild-Korrektur (Deadband-Logik) ──────────────────────────
+    # Wenn DC < 0 (Überschuss), puffert der Überschuss Spitzen – aber nie über 0 hinaus.
+    if dc_mwh < 0:
+        residuum_korr = np.where(
+            residuum > 0,
+            np.maximum(residuum - abs(dc_mwh), 0),
+            np.minimum(residuum + abs(dc_mwh), 0)
+        )
+    else:
+        residuum_korr = residuum.values
+
+    signal_ac_korr = residuum_korr - residuum_korr.mean()
+    res_e_k, res_l_k, res_p_k, _, _, _ = _fft_bins(signal_ac_korr)
+
+    return (res_e, res_l, res_p,
+            res_e_k, res_l_k, res_p_k,
+            residuum, ee,
+            freqs, speicher_mwh, perioden_h, dc_mwh)
+
+
+# Farben für die 7 Zeitskalen-Bins (konsistent in allen Diagrammen)
+BIN_COLORS = ['#2ecc71', '#27ae60', '#f39c12', '#e67e22', '#e74c3c', '#c0392b', '#8e44ad']
+
+
+def _ragone_fig(pts_vor, pts_nach=None):
+    """Ragone-Diagramm mit Technologie-Rechtecken.
+    pts_vor / pts_nach = (labels, x_gwh, y_gw)
+    """
+    fig = go.Figure()
+
+    # (Name, x0, x1, y0, y1, fill-rgba, Rahmenfarbe)
+    tech_boxes = [
+        ('Kondensatoren',  1e-5,  0.01,   10,    1e4,  'rgba(127,140,141,0.15)', '#7f8c8d'),
+        ('Li-Ionen',       0.001, 200,    0.05,  2000, 'rgba(52,152,219,0.18)',  '#2980b9'),
+        ('Redox-Flow',     1,     5000,   0.001, 10,   'rgba(26,188,156,0.18)',  '#1abc9c'),
+        ('Pumpspeicher',   0.5,   2000,   0.01,  40,   'rgba(46,204,113,0.18)',  '#27ae60'),
+        ('CAES',           10,    10000,  0.005, 5,    'rgba(230,126,34,0.18)',  '#d35400'),
+        ('Wasserstoff/PtX',100,   1e7,    0.001, 30,   'rgba(155,89,182,0.18)', '#8e44ad'),
+    ]
+
+    for name, x0, x1, y0, y1, fill, lc in tech_boxes:
+        fig.add_shape(type='rect',
+            x0=x0, x1=x1, y0=y0, y1=y1, xref='x', yref='y',
+            fillcolor=fill, line=dict(color=lc, width=1), layer='below')
+        fig.add_annotation(
+            x=np.sqrt(x0 * x1), y=np.sqrt(y0 * y1),
+            text=f"<b>{name}</b>", showarrow=False,
+            font=dict(size=9, color=lc), xref='x', yref='y')
+
+    fig.add_hrect(y0=30, y1=58, fillcolor='rgba(231,76,60,0.07)', line_width=0,
+                  annotation_text='Gas DE (30–58 GW)',
+                  annotation_position='top left', annotation_font_size=9)
+    fig.add_hrect(y0=10, y1=22, fillcolor='rgba(52,73,94,0.07)', line_width=0,
+                  annotation_text='Kohle DE (~15 GW)',
+                  annotation_position='bottom left', annotation_font_size=9)
+
+    labels_v, x_v, y_v = pts_vor
+    fig.add_trace(go.Scatter(
+        x=x_v, y=y_v, mode='markers+text',
+        marker=dict(size=13, color=BIN_COLORS, line=dict(width=1.5, color='white')),
+        text=labels_v, textposition='top center', textfont=dict(size=9),
+        name='Ohne Overbuild',
+        hovertemplate='<b>%{text}</b><br>%{x:.2g} GWh / %{y:.2g} GW<extra></extra>'
+    ))
+
+    if pts_nach:
+        labels_n, x_n, y_n = pts_nach
+        fig.add_trace(go.Scatter(
+            x=x_n, y=y_n, mode='markers+text',
+            marker=dict(size=10, color=BIN_COLORS, symbol='diamond',
+                        line=dict(width=1.5, color='white')),
+            text=labels_n, textposition='bottom center', textfont=dict(size=9),
+            name='Nach Overbuild',
+            hovertemplate='<b>%{text}</b><br>%{x:.2g} GWh / %{y:.2g} GW<extra></extra>'
+        ))
+
+    fig.update_layout(
+        xaxis_type='log', yaxis_type='log',
+        xaxis_title='Speicherkapazität [GWh]',
+        yaxis_title='Spitzenleistung [GW]',
+        height=540, plot_bgcolor='white',
+        xaxis=dict(gridcolor='lightgrey', range=[-4, 7]),
+        yaxis=dict(gridcolor='lightgrey', range=[-3, 4]),
+        showlegend=pts_nach is not None,
+        legend=dict(x=0.01, y=0.99)
+    )
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Daten-Routing: Upload → Fallback → Hinweis
+# ══════════════════════════════════════════════════════════════════════════════
 FALLBACK_VERBRAUCH = os.path.join(os.path.dirname(__file__), "Realisierter_Stromverbrauch_2025.csv")
 FALLBACK_ERZEUGUNG = os.path.join(os.path.dirname(__file__), "Realisierte_Erzeugung_2025.csv")
 
@@ -138,6 +231,9 @@ else:
     verbrauch_bytes = None
     erzeugung_bytes = None
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Hauptbereich (nur wenn Daten vorhanden)
+# ══════════════════════════════════════════════════════════════════════════════
 if verbrauch_bytes and erzeugung_bytes:
     df = lade_daten(verbrauch_bytes, erzeugung_bytes)
 
@@ -157,65 +253,152 @@ if verbrauch_bytes and erzeugung_bytes:
         st.warning("Zu wenig Datenpunkte – bitte längeren Zeitraum wählen.")
         st.stop()
 
-    # Berechnung
-    result, result_leistung, result_pmax, residuum, ee, freqs, speicher_mwh, perioden_h, dc_mwh = berechne_speicher(
+    # ── Alle Berechnungen auf einmal ──────────────────────────────────────
+    (res_e, res_l, res_p,
+     res_e_k, res_l_k, res_p_k,
+     residuum, ee,
+     freqs, speicher_mwh, perioden_h, dc_mwh) = berechne_speicher(
         df_sel, wind_off_f, wind_on_f, solar_f, bio_f, wasser_f)
 
-    gesamt = sum(result.values())
-    ee_anteil = ee.mean() / df_sel['verbrauch'].mean() * 100
-    dc_gwh_year = dc_mwh * 8760 / 1e3  # MWh/h (Leistung) × 8760 h → GWh/Jahr
+    labels      = list(res_e.keys())
+    gesamt      = sum(res_e.values())
+    gesamt_k    = sum(res_e_k.values())
+    ee_anteil   = ee.mean() / df_sel['verbrauch'].mean() * 100
+    dc_gwh_year = dc_mwh * 8760 / 1e3   # MW (Mittelleistung) × 8760 h → GWh/Jahr
+    curtailment = abs(min(dc_gwh_year, 0))
 
-    # ── KPIs ──────────────────────────────────────────────────────────────────
-    st.subheader("📊 Kennzahlen")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Gesamtspeicherbedarf", f"{gesamt:.0f} GWh")
-    k2.metric("EE-Deckungsgrad (Mittel)", f"{ee_anteil:.1f} %")
+    # Tagesmittelwerte für Zeitreihen-Plot
+    daily              = df_sel[['verbrauch']].resample('D').mean()
+    daily['ee']        = ee.resample('D').mean()
+    daily['residuum']  = residuum.resample('D').mean()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ⚙️ Abschnitt 2: EE-Skalierung
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("⚙️ EE-Skalierung")
+
+    kpi1, kpi2 = st.columns(2)
+    kpi1.metric("EE-Deckungsgrad (Mittel)", f"{ee_anteil:.1f} %",
+                help="Mittlere EE-Einspeisung / Mittlerer Verbrauch")
     if dc_gwh_year > 0:
-        dc_val_str  = f"+{dc_gwh_year:,.0f} GWh/Jahr"
-        dc_help     = "➕ Mittleres Defizit – muss zugeführt werden (Importe / konventionell)"
+        kpi2.metric("DC-Komponente", f"+{dc_gwh_year:,.0f} GWh/Jahr",
+                    help="Mittleres Defizit – muss durch Importe oder Konventionelle gedeckt werden")
     else:
-        dc_val_str  = f"{dc_gwh_year:,.0f} GWh/Jahr"
-        dc_help     = "➖ Mittlerer Überschuss – muss abgeführt werden (Export / Curtailment)"
-    k3.metric("DC-Komponente", dc_val_str, help=dc_help)
-    k4.metric("Faktor vs. Pumpspeicher (~40 GWh)", f"{gesamt/40:.0f}×")
+        kpi2.metric("DC-Komponente", f"{dc_gwh_year:,.0f} GWh/Jahr",
+                    help="Mittlerer Überschuss – wird exportiert oder curtailed")
 
-    # ── Plot 1: Balkendiagramm ─────────────────────────────────────────────────
-    st.subheader("🔋 Speicherbedarf nach Zeitskala")
-    labels = list(result.keys())
-    values = list(result.values())
+    fig_ts = go.Figure()
+    fig_ts.add_trace(go.Scatter(x=daily.index, y=daily['verbrauch'],
+                                name='Verbrauch', line=dict(color='steelblue')))
+    fig_ts.add_trace(go.Scatter(x=daily.index, y=daily['ee'],
+                                name='EE (skaliert)', line=dict(color='green')))
+    fig_ts.add_trace(go.Scatter(x=daily.index, y=daily['residuum'],
+                                name='Residuallast', line=dict(color='crimson')))
+    fig_ts.add_hline(y=0, line_dash="dash", line_color="black", line_width=0.8)
+    fig_ts.add_hline(y=dc_mwh, line_dash="dot", line_color="orange", line_width=1.2,
+                     annotation_text=f"DC ({dc_gwh_year:+,.0f} GWh/J)",
+                     annotation_position="bottom right")
+    fig_ts.update_layout(yaxis_title="MWh", height=380, plot_bgcolor='white',
+                         yaxis=dict(gridcolor='lightgrey'))
+    st.plotly_chart(fig_ts, use_container_width=True)
 
-    colors = ['#2ecc71', '#27ae60', '#f39c12', '#e67e22', '#e74c3c', '#c0392b', '#8e44ad']
-    fig1 = go.Figure(go.Bar(
-        x=labels, y=values, marker_color=colors,
-        text=[f"{v:.0f} GWh" for v in values],
+    # ══════════════════════════════════════════════════════════════════════
+    # 🌊 Schritt 1: Residuallast & FFT
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("🌊 Schritt 1 – Residuallast & FFT")
+    st.markdown(
+        "Die **Residuallast** ist die Differenz aus Verbrauch und erneuerbarer Einspeisung: "
+        "$r(t) = V(t) - EE(t)$. "
+        "Positive Werte bedeuten Defizit (Speicher oder konventionelle Kraftwerke nötig), "
+        "negative Werte Überschuss. "
+        "Eine Fourier-Transformation zerlegt dieses Signal in Frequenzkomponenten – "
+        "und zeigt, auf welchen Zeitskalen die größten Schwankungen auftreten."
+    )
+
+    with st.expander("📐 Rechenweg"):
+        st.markdown(r"""
+**Signalmodell** – eine einzelne Frequenzkomponente:
+
+$$E(t) = A \sin(2\pi f t)$$
+
+**Speicherkapazität** (maximale Energiemenge, die aufgenommen oder abgegeben werden muss):
+
+$$E_{\text{speicher}} = \frac{A}{\pi f}$$
+
+**Maximale Lade-/Entladeleistung** (Ableitung des Energiesignals):
+
+$$P_{\max} = 2\pi f \cdot A$$
+
+Dabei ist $A$ die FFT-Amplitude [MWh] und $f$ die Frequenz [1/h].
+Die Gesamtwerte pro Zeitskalen-Bin entstehen durch Summation aller enthaltenen Frequenzkomponenten.
+        """)
+
+    # FFT-Spektrum (log-log)
+    mask    = (freqs > 0) & (perioden_h >= 6) & (perioden_h <= 400 * 24)
+    pd_tage = perioden_h[mask] / 24
+    sp_mwh  = speicher_mwh[mask]
+    order   = np.argsort(pd_tage)
+    pd_tage, sp_mwh = pd_tage[order], sp_mwh[order]
+
+    fig_fft = go.Figure()
+    fig_fft.add_trace(go.Scatter(
+        x=pd_tage, y=sp_mwh,
+        mode='lines', line=dict(color='steelblue', width=0.8),
+        name='Speicherkapazität'))
+
+    for p, name in [(1, 'Tag'), (7, 'Woche'), (30, 'Monat'), (365, 'Jahr')]:
+        fig_fft.add_vline(x=p, line_dash="dash", line_color="red", opacity=0.5,
+                          annotation_text=name, annotation_position="top")
+
+    tick_vals = [6/24, 1, 7, 30, 182, 365]
+    tick_text = ['6h', '1 Tag', '1 Wo.', '1 Mo.', '6 Mo.', '1 Jahr']
+    fig_fft.update_layout(
+        xaxis_type='log', yaxis_type='log',
+        xaxis_title='Periode', yaxis_title='Speicherkapazität [MWh]',
+        height=380, plot_bgcolor='white',
+        xaxis=dict(gridcolor='lightgrey', tickvals=tick_vals, ticktext=tick_text,
+                   range=[np.log10(6/24), np.log10(400)]),
+        yaxis=dict(gridcolor='lightgrey'))
+    st.plotly_chart(fig_fft, use_container_width=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 🔋 Schritt 2: Speicherbedarf (ohne Overbuild)
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("🔋 Schritt 2 – Speicherbedarf (ohne Overbuild)")
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Gesamtspeicherbedarf", f"{gesamt:.0f} GWh")
+    k2.metric("Faktor vs. Pumpspeicher (~40 GWh)", f"{gesamt/40:.0f}×")
+    k3.metric("EE-Deckungsgrad", f"{ee_anteil:.1f} %")
+
+    # Balkendiagramm: Speicherkapazität
+    st.subheader("Speicherkapazität nach Zeitskala")
+    fig_e = go.Figure(go.Bar(
+        x=labels, y=list(res_e.values()), marker_color=BIN_COLORS,
+        text=[f"{v:.0f} GWh" for v in res_e.values()],
         textposition='outside'
     ))
-    fig1.add_hline(y=40, line_dash="dash", line_color="steelblue",
-                   annotation_text="Alle Pumpspeicher DE (~40 GWh)",
-                   annotation_position="top left")
-    fig1.update_layout(
-        yaxis_title="Speicherkapazität [GWh]",
-        xaxis_title="Zeitskala",
-        height=450,
-        plot_bgcolor='white',
-        yaxis=dict(gridcolor='lightgrey')
-    )
-    st.plotly_chart(fig1, use_container_width=True)
+    fig_e.add_hline(y=40, line_dash="dash", line_color="steelblue",
+                    annotation_text="Alle Pumpspeicher DE (~40 GWh)",
+                    annotation_position="top left")
+    fig_e.update_layout(
+        yaxis_title="Speicherkapazität [GWh]", xaxis_title="Zeitskala",
+        height=430, plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))
+    st.plotly_chart(fig_e, use_container_width=True)
 
-    # ── Plot 1b: Leistungsdiagramm ────────────────────────────────────────────
-    st.subheader("⚡ Maximale Speicherleistung pro Zeitskala")
-    lw_labels = list(result_leistung.keys())
-    lw_values = list(result_leistung.values())
+    # Balkendiagramm: Spitzenleistung
+    st.subheader("Maximale Speicherleistung nach Zeitskala")
     fig_lw = go.Figure(go.Bar(
-        x=lw_labels, y=lw_values, marker_color=colors,
-        text=[f"{v:.1f} GW" for v in lw_values],
+        x=labels, y=list(res_l.values()), marker_color=BIN_COLORS,
+        text=[f"{v:.1f} GW" for v in res_l.values()],
         textposition='outside'
     ))
     fig_lw.update_layout(
-        yaxis_title="Leistung [GW]",
-        xaxis_title="Zeitskala",
-        height=400,
-        plot_bgcolor='white',
+        yaxis_title="Leistung [GW]", xaxis_title="Zeitskala",
+        height=400, plot_bgcolor='white',
         yaxis=dict(gridcolor='lightgrey'),
         annotations=[dict(
             text="P<sub>max</sub> = 2πf · A &nbsp;(Ableitung von E = A · sin(2πft))",
@@ -226,122 +409,95 @@ if verbrauch_bytes and erzeugung_bytes:
     )
     st.plotly_chart(fig_lw, use_container_width=True)
 
-    # ── Ragone-Diagramm ────────────────────────────────────────────────────────
+    # Ragone-Diagramm (ohne Overbuild)
     st.subheader("📍 Ragone-Diagramm: Speicherkapazität vs. Spitzenleistung")
+    pts_vor = (labels,
+               [res_e[l] for l in labels],
+               [res_p[l] for l in labels])
+    st.plotly_chart(_ragone_fig(pts_vor), use_container_width=True)
 
-    fig_rag = go.Figure()
-
-    # Technologie-Rechtecke (Daten-Koordinaten; Plotly übernimmt log-Transformation)
-    tech_boxes = [
-        # (Name,         x0,      x1,     y0,     y1,     fill-rgba,                    Rahmenfarbe)
-        ('Schwungrad',   5e-5,    0.05,   0.5,    5000,   'rgba(149,165,166,0.18)',     '#7f8c8d'),
-        ('Li-Ionen',     0.001,   200,    0.05,   2000,   'rgba(52,152,219,0.18)',      '#2980b9'),
-        ('Pumpspeicher', 0.5,     2000,   0.01,   40,     'rgba(46,204,113,0.18)',      '#27ae60'),
-        ('CAES',         10,      10000,  0.005,  5,      'rgba(230,126,34,0.18)',      '#d35400'),
-        ('Wasserstoff',  100,     1e7,    0.001,  30,     'rgba(155,89,182,0.18)',      '#8e44ad'),
-    ]
-
-    for name, x0, x1, y0, y1, fill, lc in tech_boxes:
-        fig_rag.add_shape(type='rect',
-            x0=x0, x1=x1, y0=y0, y1=y1, xref='x', yref='y',
-            fillcolor=fill, line=dict(color=lc, width=1), layer='below')
-        fig_rag.add_annotation(
-            x=np.sqrt(x0 * x1), y=np.sqrt(y0 * y1),  # geometrischer Mittelpunkt (log)
-            text=f"<b>{name}</b>", showarrow=False,
-            font=dict(size=9, color=lc), xref='x', yref='y')
-
-    # Konventionelle Kraftwerke: horizontale Bänder
-    fig_rag.add_hrect(y0=30, y1=58, fillcolor='rgba(231,76,60,0.07)', line_width=0,
-                      annotation_text='Gas DE (30–58 GW)',
-                      annotation_position='top left', annotation_font_size=9)
-    fig_rag.add_hrect(y0=10, y1=22, fillcolor='rgba(52,73,94,0.07)', line_width=0,
-                      annotation_text='Kohle DE (~15 GW)',
-                      annotation_position='bottom left', annotation_font_size=9)
-
-    # FFT-Punkte (ein Punkt pro Zeitskalen-Bin)
-    x_pts = [result[l]      for l in labels]   # GWh
-    y_pts = [result_pmax[l] for l in labels]   # GW
-
-    fig_rag.add_trace(go.Scatter(
-        x=x_pts, y=y_pts,
-        mode='markers+text',
-        marker=dict(size=13, color=colors, line=dict(width=1.5, color='white')),
-        text=labels,
-        textposition='top center',
-        textfont=dict(size=9),
-        name='FFT-Bins',
-        hovertemplate='<b>%{text}</b><br>Kapazität: %{x:.2g} GWh<br>Leistung: %{y:.2g} GW<extra></extra>'
-    ))
-
-    fig_rag.update_layout(
-        xaxis_type='log', yaxis_type='log',
-        xaxis_title='Speicherkapazität [GWh]',
-        yaxis_title='Spitzenleistung [GW]',
-        height=540,
-        plot_bgcolor='white',
-        xaxis=dict(gridcolor='lightgrey', range=[-4, 7]),
-        yaxis=dict(gridcolor='lightgrey', range=[-3, 4]),
-        showlegend=False,
+    # ══════════════════════════════════════════════════════════════════════
+    # 🏗️ Schritt 3: Overbuild & Curtailment
+    # ══════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.header("🏗️ Schritt 3 – Overbuild & Curtailment")
+    st.markdown(
+        "Wenn mehr EE installiert ist als der mittlere Verbrauch (**Overbuild**), "
+        "entsteht eine negative DC-Komponente im Residuum. "
+        "Dieser permanente Überschuss kann positive Lastspitzen abpuffern – "
+        "allerdings nur solange das Residuum über null liegt (**Deadband**). "
+        "Negative Restmengen lassen sich nicht weiter reduzieren, "
+        "da man Energie nicht 'zurücknehmen' kann. "
+        "Der nicht nutzbare Teil wird als **Curtailment** (Abregelung) verbucht."
     )
-    st.plotly_chart(fig_rag, use_container_width=True)
 
-    # ── Plot 2: Zeitreihe + FFT-Spektrum ──────────────────────────────────────
-    col_a, col_b = st.columns(2)
+    if dc_mwh < 0:
+        st.success(
+            f"✅ Overbuild aktiv: DC = {dc_gwh_year:,.0f} GWh/Jahr "
+            f"→ Curtailment ≈ {curtailment:,.0f} GWh/Jahr"
+        )
+    else:
+        st.info("ℹ️ Kein Overbuild (DC ≥ 0) – Korrektur hat keinen Effekt auf das Spektrum.")
 
-    with col_a:
-        st.subheader("📈 Zeitreihe (Tagesmittel)")
-        daily = df_sel[['verbrauch']].resample('D').mean()
-        daily['ee'] = ee.resample('D').mean()
-        daily['residuum'] = residuum.resample('D').mean()
+    kc1, kc2, kc3 = st.columns(3)
+    kc1.metric("DC-Komponente", f"{dc_gwh_year:+,.0f} GWh/Jahr")
+    kc2.metric("Curtailment (bei DC < 0)", f"{curtailment:,.0f} GWh/Jahr")
+    kc3.metric("Speicherbedarf nach Korrektur", f"{gesamt_k:.0f} GWh",
+               delta=f"{gesamt_k - gesamt:+.0f} GWh")
 
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=daily.index, y=daily['verbrauch'],
-                                   name='Verbrauch', line=dict(color='steelblue')))
-        fig2.add_trace(go.Scatter(x=daily.index, y=daily['ee'],
-                                   name='EE (skaliert)', line=dict(color='green')))
-        fig2.add_trace(go.Scatter(x=daily.index, y=daily['residuum'],
-                                   name='Residuum', line=dict(color='crimson')))
-        fig2.add_hline(y=0, line_dash="dash", line_color="black", line_width=0.8)
-        fig2.add_hline(y=dc_mwh, line_dash="dot", line_color="orange", line_width=1.2,
-                       annotation_text=f"DC ({dc_gwh_year:+,.0f} GWh/J)",
-                       annotation_position="bottom right")
-        fig2.update_layout(yaxis_title="MWh", height=380,
-                            plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))
-        st.plotly_chart(fig2, use_container_width=True)
+    # Vergleichs-Balken: Speicherkapazität
+    st.subheader("Vergleich Speicherkapazität: vor vs. nach Overbuild-Korrektur")
+    fig_vgl_e = go.Figure()
+    fig_vgl_e.add_trace(go.Bar(
+        name='Ohne Korrektur', x=labels, y=list(res_e.values()),
+        marker_color='steelblue',
+        text=[f"{v:.0f}" for v in res_e.values()], textposition='outside'
+    ))
+    fig_vgl_e.add_trace(go.Bar(
+        name='Nach Korrektur', x=labels, y=list(res_e_k.values()),
+        marker_color='tomato',
+        text=[f"{v:.0f}" for v in res_e_k.values()], textposition='outside'
+    ))
+    fig_vgl_e.add_hline(y=40, line_dash="dash", line_color="grey",
+                        annotation_text="Pumpspeicher DE (~40 GWh)",
+                        annotation_position="top left")
+    fig_vgl_e.update_layout(
+        barmode='group', yaxis_title="Speicherkapazität [GWh]",
+        height=430, plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))
+    st.plotly_chart(fig_vgl_e, use_container_width=True)
 
-    with col_b:
-        st.subheader("🌊 FFT-Spektrum (log-log)")
-        mask = (freqs > 0) & (perioden_h >= 6) & (perioden_h <= 400 * 24)
-        pd_tage = perioden_h[mask] / 24
-        sp_mwh  = speicher_mwh[mask]
-        # Aufsteigend nach Periode sortieren (FFT liefert absteigende Reihenfolge)
-        order = np.argsort(pd_tage)
-        pd_tage, sp_mwh = pd_tage[order], sp_mwh[order]
+    # Vergleichs-Balken: Spitzenleistung
+    st.subheader("Vergleich Spitzenleistung: vor vs. nach Overbuild-Korrektur")
+    fig_vgl_l = go.Figure()
+    fig_vgl_l.add_trace(go.Bar(
+        name='Ohne Korrektur', x=labels, y=list(res_l.values()),
+        marker_color='steelblue',
+        text=[f"{v:.1f}" for v in res_l.values()], textposition='outside'
+    ))
+    fig_vgl_l.add_trace(go.Bar(
+        name='Nach Korrektur', x=labels, y=list(res_l_k.values()),
+        marker_color='tomato',
+        text=[f"{v:.1f}" for v in res_l_k.values()], textposition='outside'
+    ))
+    fig_vgl_l.update_layout(
+        barmode='group', yaxis_title="Spitzenleistung [GW]",
+        height=430, plot_bgcolor='white', yaxis=dict(gridcolor='lightgrey'))
+    st.plotly_chart(fig_vgl_l, use_container_width=True)
 
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(
-            x=pd_tage, y=sp_mwh,
-            mode='lines', line=dict(color='steelblue', width=0.8),
-            name='Speicherbedarf'))
+    # Ragone-Diagramm: vor vs. nach Overbuild
+    st.subheader("📍 Ragone-Diagramm: vor vs. nach Overbuild-Korrektur")
+    pts_nach = (labels,
+                [res_e_k[l] for l in labels],
+                [res_p_k[l] for l in labels])
+    st.plotly_chart(_ragone_fig(pts_vor, pts_nach), use_container_width=True)
 
-        for p, name in [(1, 'Tag'), (7, 'Woche'), (30, 'Monat'), (365, 'Jahr')]:
-            fig3.add_vline(x=p, line_dash="dash", line_color="red", opacity=0.5,
-                           annotation_text=name, annotation_position="top")
-
-        tick_vals = [6/24, 1, 7, 30, 182, 365]
-        tick_text = ['6h', '1 Tag', '1 Wo.', '1 Mo.', '6 Mo.', '1 Jahr']
-        fig3.update_layout(
-            xaxis_type='log', yaxis_type='log',
-            xaxis_title='Periode', yaxis_title='Speicherkapazität [MWh]',
-            height=380, plot_bgcolor='white',
-            xaxis=dict(gridcolor='lightgrey', tickvals=tick_vals, ticktext=tick_text,
-                       range=[np.log10(6/24), np.log10(400)]),
-            yaxis=dict(gridcolor='lightgrey'))
-        st.plotly_chart(fig3, use_container_width=True)
-
-    # ── Rohdaten ──────────────────────────────────────────────────────────────
+    # ── Rohdaten ──────────────────────────────────────────────────────────
     with st.expander("📋 Rohdaten (Tagesmittel)"):
         st.dataframe(daily.round(1), use_container_width=True)
 
 else:
-    st.info("Bitte oben beide SMARD-CSV-Dateien hochladen – oder lokale Fallback-CSVs (`Realisierter_Stromverbrauch_2025.csv` / `Realisierte_Erzeugung_2025.csv`) im App-Verzeichnis bereitstellen.")
+    st.info(
+        "Bitte oben beide SMARD-CSV-Dateien hochladen – oder lokale Fallback-CSVs "
+        "(`Realisierter_Stromverbrauch_2025.csv` / `Realisierte_Erzeugung_2025.csv`) "
+        "im App-Verzeichnis bereitstellen."
+    )
